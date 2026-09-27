@@ -1,0 +1,42 @@
+# Python / local builds
+__pycache__/
+*.py[cod]
+.venv/
+work/
+build/
+install/
+log/
+
+# Generated trajectories, assets, reports and controller configuration
+/*.json
+/*.csv
+/*.png
+/*.urdf
+/*.usda
+/mock-cumotion-controllers.yaml
+/project-state.yaml
+/assets/
+/assets-physical/
+/execution-history/
+*.log
+*.pid
+*.lock
+*.tmp
+/*-backup-*/
+/*.txt
+!/analysis-requirements.txt
+
+# Robot-specific data and local qualification evidence
+/robot-setup/*.yaml
+/robot-setup/*.urdf
+/robot-setup/*.json
+/robot-setup/executor-mock-tests/
+/robot-setup/final-execute-qualification/
+/robot-setup/saved-preview-before-execute/
+
+# Local secrets / credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key

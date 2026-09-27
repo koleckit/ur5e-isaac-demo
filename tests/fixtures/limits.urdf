@@ -1,0 +1,8 @@
+<robot name="synthetic_test_limits">
+  <joint name="shoulder_pan_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+  <joint name="shoulder_lift_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+  <joint name="elbow_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+  <joint name="wrist_1_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+  <joint name="wrist_2_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+  <joint name="wrist_3_joint" type="revolute"><limit lower="-6.283185307179586" upper="6.283185307179586" velocity="3" effort="100"/></joint>
+</robot>

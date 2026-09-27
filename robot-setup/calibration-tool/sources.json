@@ -1,0 +1,17 @@
+[
+  {
+    "file": "calibration.cpp",
+    "url": "https://raw.githubusercontent.com/UniversalRobots/Universal_Robots_ROS2_Driver/6.0.0/ur_calibration/src/calibration.cpp",
+    "upstream_sha256": "65d37a342066da714844f378a52bc6248490b55a360c6968b1b5aaf7ed67e3ea"
+  },
+  {
+    "file": "calibration_consumer.cpp",
+    "url": "https://raw.githubusercontent.com/UniversalRobots/Universal_Robots_ROS2_Driver/6.0.0/ur_calibration/src/calibration_consumer.cpp",
+    "upstream_sha256": "0e044931c322ca7c2c24f61de397f7e3244a46c94ff87381a61171beb974639e"
+  },
+  {
+    "file": "calibration_correction.cpp",
+    "url": "https://raw.githubusercontent.com/UniversalRobots/Universal_Robots_ROS2_Driver/6.0.0/ur_calibration/src/calibration_correction.cpp",
+    "upstream_sha256": "2546edda726fa55c17d1c72804eabb020526c2f45b133af42f2cc3dcee790126"
+  }
+]

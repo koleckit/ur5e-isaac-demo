@@ -1,0 +1,20 @@
+name: Source and trajectory contract
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install mathematical test dependencies
+        run: python -m pip install numpy PyYAML
+      - name: Python and shell syntax
+        run: |
+          python -m compileall -q .
+          while IFS= read -r -d '' script; do bash -n "$script"; done < <(find . -name '*.sh' -print0)
+      - name: Synthetic trajectory contract
+        run: python test-execution-contract.py

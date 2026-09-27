@@ -1,0 +1,67 @@
+{
+  "provenance": "synthetic offline mock fixture; never a physical robot recording",
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "points": [
+    {
+      "positions": [
+        0.0,
+        -2.2,
+        1.9,
+        -1.383,
+        -1.57,
+        0.0
+      ],
+      "velocities": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "accelerations": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "time_from_start_s": 0.0
+    },
+    {
+      "positions": [
+        0.15,
+        -2.2,
+        1.9,
+        -1.383,
+        -1.57,
+        0.0
+      ],
+      "velocities": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "accelerations": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "time_from_start_s": 3.0
+    }
+  ]
+}

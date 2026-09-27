@@ -1,0 +1,8 @@
+FROM nvcr.io/nvidia/isaac/ros@sha256:8b08a75a95692d64ba68cd244b04519cd837789c33781340b166427043dcc42d
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    ros-lyrical-isaac-ros-cumotion=5.0.0-0noble.20260918011121000 \
+    ros-lyrical-isaac-ros-cumotion-moveit=5.0.0-0noble.20260918011121000 \
+    ros-lyrical-isaac-ros-cumotion-robot-description=5.0.0-0noble.20260918011121000 \
+    ros-lyrical-ur \
+    && dpkg-query -W -f='${binary:Package}\t${Version}\n' > /opt/ur-demo-package-versions.txt \
+    && rm -rf /var/lib/apt/lists/*
