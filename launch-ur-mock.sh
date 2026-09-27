@@ -2,7 +2,7 @@
 set -eo pipefail
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$project_dir/ros-env.sh"
-export ROS_DOMAIN_ID=172
+export ROS_DOMAIN_ID=${UR_MOCK_ROS_DOMAIN_ID:-172}
 export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 unset ROS_STATIC_PEERS
 extra_args=()

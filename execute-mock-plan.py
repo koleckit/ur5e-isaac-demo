@@ -21,11 +21,15 @@ from controller_manager_msgs.srv import ListControllers
 parser = argparse.ArgumentParser()
 parser.add_argument('--prepare', action='store_true')
 parser.add_argument('--trajectory', default='ur5e-moveit-cumotion-planned-trajectory.json')
+parser.add_argument('--output-dir')
 args = parser.parse_args()
 directory = Path(__file__).resolve().parent
 path = Path(args.trajectory)
 if not path.is_absolute():
     path = directory / path
+if args.output_dir:
+    directory = Path(args.output_dir).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
 trajectory_bytes = path.read_bytes()
 trajectory = json.loads(trajectory_bytes)
 digest = hashlib.sha256(trajectory_bytes).hexdigest()
@@ -93,8 +97,7 @@ try:
         attestation = json.loads((directory / 'preview-attestation.json').read_text())
         if attestation.get('result') != 'PASS' or attestation.get('trajectory_sha256') != digest:
             raise RuntimeError('No successful preview of this exact trajectory')
-        if time.monotonic()-state['received'] > 0.2:
-            raise RuntimeError('Initial joint state is stale')
+        wait_until(lambda: time.monotonic()-state['received'] < 0.1, 5, 'Initial joint state is stale')
         difference = max(abs(a-b) for a,b in zip(state['positions'], trajectory['points'][0]['positions']))
         if difference > 0.003:
             raise RuntimeError(f'Initial state differs from preview by {difference} rad')
@@ -124,7 +127,7 @@ try:
         (directory / 'execution-state.json').write_text(json.dumps({'state': 'RUNNING',
             'trajectory_sha256': digest, 'start_unix_s': goal.trajectory.header.stamp.sec+goal.trajectory.header.stamp.nanosec/1e9})+'\n')
     result_future = handle.get_result_async()
-    wait_until(result_future.done, 20, 'Trajectory execution timed out')
+    wait_until(result_future.done, max(20, trajectory['points'][-1]['time_from_start_s']+15), 'Trajectory execution timed out')
     result = result_future.result()
     if result.status != 4 or result.result.error_code != 0:
         raise RuntimeError(f'FJT failed: {result.status}, {result.result}')

@@ -34,8 +34,9 @@ def generate_launch_description():
             launch_arguments={
                 'cumotion_action_server.urdf_file_path': urdf_file,
                 'cumotion_action_server.xrdf_file_path':
-                    '/opt/ros/lyrical/share/isaac_ros_cumotion_robot_description/xrdf/ur5e.xrdf',
+                    os.environ.get('UR_DEMO_XRDF', '/opt/ros/lyrical/share/isaac_ros_cumotion_robot_description/xrdf/ur5e.xrdf'),
                 'cumotion_action_server.read_esdf_world': 'false',
+                'cumotion_action_server.publish_self_collision_spheres': os.environ.get('UR_DEMO_SELF_SPHERES', 'false'),
                 'cumotion_action_server.interpolation_dt': os.environ.get('UR_DEMO_INTERPOLATION_DT', '0.05'),
             }.items()),
         Node(package='moveit_ros_move_group', executable='move_group', name='move_group',

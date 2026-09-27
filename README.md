@@ -4,6 +4,10 @@ Local technology demo: **TargetTCP in Isaac Sim → MoveIt 2 / cuMotion plan →
 
 The Isaac Sim panel is English ASCII and includes Plan, Preview, Reset TargetTCP, Execute on UR5e and Stop. An independent offline mode executes only on ros2_control GenericSystem. Physical execution checks the exact preview hash, calibration, zero TCP, fresh state/start position, robot modes, collision scene and controller configuration before arming. It deactivates its motion controller after completion or cancellation.
 
+## Static obstacle course
+
+An optional, independent [collision-aware obstacle course](obstacle_course/README.md) adds a wall, corridor and 3D gate. One YAML drives both Isaac Sim BOX visuals and MoveIt CollisionObjects. The demo uses the real cuMotion GPU backend, verifies the complete robot trajectory for collisions, then keeps the same GHOST preview and approval workflow. Its virtual mode runs on a separate GenericSystem domain 178; physical Execute remains an explicit operator action after matching actual obstacles to the model.
+
 ## Development environment
 
 Recorded on Ubuntu 24.04 x86_64, RTX 5090 with NVIDIA 595.91.07, ROS 2 Lyrical, UR ROS 2 Driver 6.0.0, Isaac ROS/cuMotion 5.0 and standalone Isaac Sim 6.0.1-rc.7. This is the tested local stack; the repository does not assert validation on other combinations. Sim uses its bundled Jazzy bridge and communicates over DDS with host/container Lyrical. Docker image versions are pinned in `Dockerfile.isaac-ros`.

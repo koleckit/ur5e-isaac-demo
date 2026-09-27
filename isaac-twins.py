@@ -18,6 +18,10 @@ parser.add_argument('--physical-preview', action='store_true')
 parser.add_argument('--enable-physical-execution', action='store_true')
 parser.add_argument('--plan-preview-test', action='store_true')
 parser.add_argument('--trajectory')
+parser.add_argument('--obstacle-course')
+parser.add_argument('--scenario', default='single_wall')
+parser.add_argument('--output-dir')
+parser.add_argument('--course-test', action='store_true')
 args = parser.parse_args()
 if args.enable_physical_execution and not args.physical_preview:
     raise ValueError('Physical Execute requires physical mode')
@@ -43,12 +47,16 @@ import omni.kit.app
 import omni.usd
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
+source_directory = directory
 module_spec = importlib.util.spec_from_file_location('demo_model', directory / 'demo-model.py')
 model = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(model)
 trajectory_path = Path(args.trajectory)
 if not trajectory_path.is_absolute():
     trajectory_path = directory / trajectory_path
+if args.output_dir:
+    directory = Path(args.output_dir).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
 trajectory_bytes = trajectory_path.read_bytes()
 trajectory = json.loads(trajectory_bytes)
 trajectory_hash = hashlib.sha256(trajectory_bytes).hexdigest()
@@ -101,7 +109,7 @@ try:
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
     world = UsdGeom.Xform.Define(stage, '/World')
     stage.SetDefaultPrim(world.GetPrim())
-    asset = json.loads((directory / ('ur5e-physical-asset.json' if args.physical_preview else 'ur5e-asset.json')).read_text())['usd_path']
+    asset = json.loads((source_directory / ('ur5e-physical-asset.json' if args.physical_preview else 'ur5e-asset.json')).read_text())['usd_path']
     twin_maps = {}
     for twin in ['REAL', 'GHOST']:
         prim = stage.DefinePrim('/World/'+twin, 'Xform')
@@ -132,6 +140,17 @@ try:
     target_op = target.AddTransformOp()
     target_matrix = (np.asarray(trajectory['target_tcp']['matrix_column_vectors']) if 'target_tcp' in trajectory
         else kinematics.world_transforms(dict(zip(names, trajectory['points'][-1]['positions'])))['tool0'])
+    course_view = None
+    course = None
+    if args.obstacle_course:
+        import sys
+        sys.path.insert(0, str(source_directory / 'obstacle_course/src'))
+        from world import load
+        from isaac_view import View
+        course = load(args.obstacle_course, args.scenario)
+        target_matrix = np.asarray(course['goal']['matrix_column_vectors'])
+        course_view = View(stage, course, kinematics, model)
+        report['obstacle_geometry'] = course_view.verify()
     target_op.Set(usd_matrix(target_matrix))
     marker = UsdGeom.Sphere.Define(stage, '/World/TargetTCP/Marker')
     marker.CreateRadiusAttr(0.025)
@@ -152,10 +171,11 @@ try:
     target_config['quaternion_xyzw'] = list(target_rotation.GetImaginary())+[target_rotation.GetReal()]
     (directory / f'{prefix}target-tcp.json').write_text(json.dumps(target_config, indent=2)+'\n')
     camera = UsdGeom.Camera.Define(stage, '/World/Camera')
-    camera.CreateFocalLengthAttr(24.0)
+    camera.CreateFocalLengthAttr(30.0 if course else 24.0)
     camera.CreateHorizontalApertureAttr(36.0)
     camera.CreateVerticalApertureAttr(20.25)
-    eye, aim = Gf.Vec3d(1.6, 1.5, 1.3), Gf.Vec3d(0, 0, 0.4)
+    eye, aim = ((Gf.Vec3d(1.25, 1.2, 1.05), Gf.Vec3d(.05, .05, .48)) if course
+        else (Gf.Vec3d(1.6, 1.5, 1.3), Gf.Vec3d(0, 0, 0.4)))
     camera.AddTransformOp().Set(Gf.Matrix4d().SetLookAt(eye, aim, Gf.Vec3d(0,0,1)).GetInverse())
     from omni.kit.viewport.utility import get_active_viewport, capture_viewport_to_file
     viewport = get_active_viewport()
@@ -168,7 +188,8 @@ try:
     if state['positions'] is None:
         raise TimeoutError('No six-joint /joint_states. Start launch-ur-mock.sh for the offline demo.')
     preview_start = time.monotonic()
-    preview_ready, preview_active = False, not args.physical_preview
+    preview_ready, preview_active = False, not args.physical_preview and not args.obstacle_course
+    plan_valid = not args.obstacle_course
     operation_kind, workflow_finished = '', False
     execution_display_error = 0.0
     planned_target_matrix = target_matrix.copy()
@@ -178,9 +199,11 @@ try:
     preview_button = None
     stop_button = None
     telemetry_label = None
+    metrics_label = None
     area_clear = None
     execution_id = None
     held_preview_time = 0.0
+    last_geometry_check = 0.0
 
     def status(text):
         if status_label is not None:
@@ -194,9 +217,19 @@ try:
             'operator_approved_physical': False}, indent=2)+'\n')
 
     def request_plan():
-        global operation, operation_log, operation_kind, preview_ready, preview_active, planned_target_matrix
+        global operation, operation_log, operation_kind, preview_ready, preview_active, planned_target_matrix, plan_valid
         if operation is not None:
             return
+        if course_view:
+            try:
+                course_view.verify()
+                if load(course['config_path'], course['scenario'])['geometry_sha256'] != course['geometry_sha256']:
+                    raise RuntimeError('YAML changed; restart the course to load matching visuals')
+            except Exception as exc:
+                plan_valid, preview_ready, preview_active = False, False, False
+                course_view.clear_path()
+                status('PLANNING FAILED: '+str(exc))
+                return
         matrix = np.asarray(UsdGeom.XformCache().GetLocalToWorldTransform(target.GetPrim())).T
         planned_target_matrix = matrix.copy()
         config = dict(target_config, matrix_column_vectors=matrix.tolist())
@@ -209,12 +242,16 @@ try:
             UR_DOD_TARGET_TOPIC='/ur_demo/target_tcp',
             UR_DOD_OUTPUT_PREFIX=plan_prefix, UR_DOD_URDF=str(urdf_file),
             UR_DOD_CALIBRATION=target_config['calibration'],
-            UR_DOD_SEEDED_IK='1' if args.physical_preview else '0',
+            UR_DOD_SEEDED_IK='1' if args.physical_preview or args.obstacle_course else '0',
             UR_DOD_PREPARE_PHYSICAL='1' if args.physical_preview else '0',
-            UR_DEMO_ROS_DOMAIN_ID='174' if args.physical_preview else '172')
+            UR_DEMO_ROS_DOMAIN_ID=str(node.context.get_domain_id()), UR_DOD_OUTPUT_DIR=str(directory))
+        if course:
+            environment.update(UR_DOD_COURSE_CONFIG=course['config_path'], UR_DOD_COURSE_SCENARIO=course['scenario'])
+            course_view.clear_path()
+        plan_valid = False
         operation_log = (directory / f'{prefix}interactive-plan.log').open('w')
         (directory / f'{plan_prefix}-dod.json').write_text(json.dumps({'result': 'RUNNING'})+'\n')
-        operation = subprocess.Popen(['/bin/bash', str(directory / 'run-host-ros.sh'), str(directory / 'test-cumotion.py')],
+        operation = subprocess.Popen(['/bin/bash', str(source_directory / 'run-host-ros.sh'), str(source_directory / 'test-cumotion.py')],
             env=environment, stdout=operation_log, stderr=subprocess.STDOUT, start_new_session=True)
         operation_kind, preview_ready, preview_active = 'plan', False, False
         if area_clear is not None:
@@ -225,6 +262,9 @@ try:
         global preview_start, preview_ready, preview_active
         if operation is not None:
             return
+        if not plan_valid:
+            status('PLANNING FAILED or target changed - click Plan first')
+            return
         if args.physical_preview and 'physical_contract' not in trajectory:
             status('Click Plan to prepare a physical trajectory first')
             return
@@ -233,6 +273,16 @@ try:
 
     def request_execute():
         global operation, operation_log, operation_kind, execution_id, held_preview_time
+        if not plan_valid:
+            return
+        if course_view:
+            try:
+                course_view.verify()
+                if load(course['config_path'], course['scenario'])['geometry_sha256'] != course['geometry_sha256']:
+                    raise RuntimeError('Obstacle YAML changed; restart the course')
+            except Exception as exc:
+                status('PLANNING FAILED: '+str(exc))
+                return
         if args.physical_preview:
             if not args.enable_physical_execution or operation is not None or not preview_ready:
                 return
@@ -242,15 +292,17 @@ try:
             execution_id = str(uuid.uuid4())
             approval = {'execution_id': execution_id, 'trajectory_sha256': trajectory_hash,
                 'operator_approved_physical': True, 'approved_unix_s': time.time(), 'work_area_clear': True,
+                'obstacle_geometry_sha256': course['geometry_sha256'] if course else None,
+                'physical_obstacles_match_scene': bool(course),
                 'source': 'Isaac Sim Execute on UR5e button', 'target_tcp': planned_target_matrix.tolist()}
             approval_path = directory / 'physical-execution-approval.json'
             approval_path.write_text(json.dumps(approval, indent=2)+'\n')
             (directory / 'physical-execute-dod.json').write_text(json.dumps({
                 'result': 'RUNNING', 'execution_id': execution_id, 'physical_trajectory_sent': False})+'\n')
             operation_log = (directory / 'physical-interactive-execute.log').open('w')
-            operation = subprocess.Popen(['/bin/bash', str(directory / 'run-host-ros.sh'),
-                str(directory / 'execute-physical-plan.py'), '--execute', '--trajectory', str(trajectory_path),
-                '--approval', str(approval_path)],
+            operation = subprocess.Popen(['/bin/bash', str(source_directory / 'run-host-ros.sh'),
+                str(source_directory / 'execute-physical-plan.py'), '--execute', '--trajectory', str(trajectory_path),
+                '--approval', str(approval_path), '--output-dir', str(directory)],
                 env=dict(os.environ, UR_DEMO_ROS_DOMAIN_ID='174'),
                 stdout=operation_log, stderr=subprocess.STDOUT, start_new_session=True)
             operation_kind, held_preview_time = 'execute', 0.0
@@ -261,8 +313,9 @@ try:
         (directory / 'execution-state.json').write_text(json.dumps({
             'state': 'QUEUED', 'trajectory_sha256': trajectory_hash})+'\n')
         operation_log = (directory / 'interactive-execute.log').open('w')
-        operation = subprocess.Popen(['/bin/bash', str(directory / 'run-host-ros.sh'),
-            str(directory / 'execute-mock-plan.py'), '--trajectory', str(trajectory_path)],
+        operation = subprocess.Popen(['/bin/bash', str(source_directory / 'run-host-ros.sh'),
+            str(source_directory / 'execute-mock-plan.py'), '--trajectory', str(trajectory_path), '--output-dir', str(directory)],
+            env=dict(os.environ, UR_DEMO_ROS_DOMAIN_ID=str(node.context.get_domain_id())),
             stdout=operation_log, stderr=subprocess.STDOUT, start_new_session=True)
         operation_kind = 'execute'
         status('Execute MOCK - REAL follows the controller')
@@ -276,19 +329,21 @@ try:
             status('Stop requested - canceling trajectory and deactivating controller...')
 
     def request_reset_tcp():
-        global preview_ready, preview_active
+        global preview_ready, preview_active, plan_valid
         if operation is not None:
             return
         matrix = kinematics.world_transforms(state['positions'])['tool0']
         # Gizmo editing can replace the original transform operation stack.
         target.ClearXformOpOrder()
         target.MakeMatrixXform().Set(usd_matrix(matrix))
-        preview_ready, preview_active = False, False
+        preview_ready, preview_active, plan_valid = False, False, False
+        if course_view:
+            course_view.clear_path()
         status('TargetTCP reset to current REAL TCP - move target and click Plan')
 
     if not args.headless:
         import omni.ui as ui
-        window = ui.Window('UR5e - Plan / Preview / Execute' if args.enable_physical_execution else 'UR5e - REAL / Plan / Preview' if args.physical_preview else 'UR5e - Plan / Preview / Execute MOCK', width=560, height=365)
+        window = ui.Window('UR5e - Plan / Preview / Execute' if args.enable_physical_execution else 'UR5e - REAL / Plan / Preview' if args.physical_preview else 'UR5e - Plan / Preview / Execute MOCK', width=560, height=405 if course else 365)
         with window.frame:
             with ui.VStack(spacing=8):
                 ui.Label('UR5e 192.168.60.201 - factory calibration - TCP 0' if args.physical_preview else 'Offline - UR5e GenericSystem mock', height=25)
@@ -304,10 +359,12 @@ try:
                     with ui.HStack(height=25):
                         area_clear = ui.SimpleBoolModel(False)
                         ui.CheckBox(model=area_clear, width=25)
-                        ui.Label('Work area is clear (surroundings are not modeled)')
+                        ui.Label('Physical obstacles match this scene; work area is clear' if course else 'Work area is clear (surroundings are not modeled)')
                     stop_button = ui.Button('Stop', clicked_fn=request_stop, height=35, enabled=False)
                     telemetry_label = ui.Label('External Control status / speed scaling', height=25)
                 status_label = ui.Label('REAL follows the robot - move TargetTCP and click Plan' if args.physical_preview else 'Initial trajectory preview', word_wrap=True)
+                if course:
+                    metrics_label = ui.Label('Planner: cuMotion | Waiting for Plan', word_wrap=True)
     if args.plan_preview_test:
         expected_reset = kinematics.world_transforms(state['positions'])['tool0']
         target.AddTranslateOp(opSuffix='resetTest').Set(Gf.Vec3d(0.03, 0, 0))
@@ -321,7 +378,7 @@ try:
         target.MakeMatrixXform().Set(usd_matrix(matrix))
         # Publish this pose before the planning client starts waiting for the live topic.
         app.update()
-    if args.workflow_test or args.plan_preview_test:
+    if args.workflow_test or args.plan_preview_test or args.course_test:
         request_plan()
     frames, max_fk_error, real_max_fk_error = 0, 0.0, 0.0
     while app.is_running() and not shutdown_requested:
@@ -339,10 +396,14 @@ try:
                 report['physical_trajectory_sent'] |= result.get('physical_trajectory_sent', False)
                 report['last_execution'] = result
             if exit_code != 0 or result.get('result') != 'PASS':
-                status(f"{finished_kind}: {result.get('result', 'FAIL')} - {result.get('error', 'check log')}")
+                if finished_kind == 'plan':
+                    plan_valid, preview_ready, preview_active = False, False, False
+                    if course_view:
+                        course_view.clear_path()
+                status(f"{'PLANNING FAILED' if finished_kind == 'plan' else finished_kind}: {result.get('error', 'check log')}")
                 if finished_kind == 'execute':
                     preview_ready, preview_active = False, False
-                if args.workflow_test or args.plan_preview_test:
+                if args.workflow_test or args.plan_preview_test or args.course_test:
                     raise RuntimeError(f'{finished_kind} failed: {result}')
             elif finished_kind == 'plan':
                 trajectory_path = directory / f'ur5e-{plan_prefix}-planned-trajectory.json'
@@ -351,16 +412,27 @@ try:
                 if trajectory['joint_names'] != names:
                     raise ValueError('Live plan joint order changed')
                 duration = trajectory['points'][-1]['time_from_start_s']
+                plan_valid = True
+                if course_view:
+                    if trajectory['obstacle_course']['geometry_sha256'] != course['geometry_sha256']:
+                        raise RuntimeError('Planner world differs from the displayed course; restart the course')
+                    course_view.paths(trajectory)
+                    report['obstacle_geometry'] = course_view.verify()
+                    report['planning_metrics'] = result
+                    if metrics_label is not None:
+                        metrics_label.text = (f"Planner: cuMotion | GPU plan: {result['planning_time_s']*1000:.1f} ms "
+                            f"| attempts: {len(result['course_planning_attempts'])} | duration: {duration:.2f} s "
+                            f"| points: {len(trajectory['points'])} | boxes: {result['world_collision_objects']}")
                 held_preview_time = 0.0
                 planned_target_matrix = np.asarray(trajectory['target_tcp']['matrix_column_vectors'])
                 preview_start, preview_ready, preview_active = time.monotonic(), False, True
-                status(f'Plan ready - {duration:.2f} s - GHOST preview')
+                status(f"Plan SUCCESS | cuMotion | {result['planning_time_s']*1000:.1f} ms | {duration:.2f} s | {len(trajectory['points'])} points | {result.get('world_collision_objects',0)} boxes | GHOST preview")
             else:
                 preview_ready, preview_active = False, False
                 status('Execute on UR5e: PASS - planned-vs-actual saved; Plan again' if args.physical_preview else 'Execute MOCK: PASS - planned-vs-actual saved')
                 workflow_finished = True
         elapsed = time.monotonic()-preview_start
-        preview_time = min(elapsed, duration) if preview_active or not args.physical_preview else held_preview_time
+        preview_time = min(elapsed, duration) if preview_active else held_preview_time
         execution_running = operation_kind == 'execute'
         if execution_running:
             preview_time = 0.0
@@ -377,7 +449,8 @@ try:
                         preview_time = duration
                 except json.JSONDecodeError:
                     pass
-        ghost_positions = model.sample_trajectory(trajectory, preview_time)
+        ghost_positions = (model.sample_trajectory(trajectory, preview_time) if plan_valid
+            else np.asarray([state['positions'][n] for n in names]))
         if execution_running:
             execution_display_error = max(execution_display_error,
                 float(np.max(np.abs(ghost_positions-np.asarray([state['positions'][n] for n in names])))))
@@ -408,9 +481,23 @@ try:
         pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z = quaternion.GetImaginary()
         target_publisher.publish(pose)
         current_target_matrix = np.asarray(target_world).T
+        if course_view and plan_valid and not execution_running and time.monotonic()-last_geometry_check > .25:
+            last_geometry_check = time.monotonic()
+            try:
+                course_view.verify()
+                if load(course['config_path'], course['scenario'])['geometry_sha256'] != course['geometry_sha256']:
+                    raise RuntimeError('Obstacle YAML changed; restart the course')
+            except Exception as exc:
+                plan_valid, preview_ready, preview_active = False, False, False
+                course_view.clear_path()
+                status('PLANNING FAILED: '+str(exc))
         target_changed = float(np.max(np.abs(current_target_matrix-planned_target_matrix))) > 1e-6
         if target_changed:
-            preview_ready = False
+            preview_ready, preview_active = False, False
+            if operation_kind != 'plan':
+                plan_valid = False
+                if course_view:
+                    course_view.clear_path()
             if area_clear is not None:
                 area_clear.set_value(False)
         if preview_active and elapsed >= duration and not target_changed:
@@ -420,10 +507,12 @@ try:
             status('Preview complete - confirm clear work area, then Execute on UR5e' if args.enable_physical_execution else 'Preview complete - physical execution disabled' if args.physical_preview else 'Preview complete - Execute MOCK is available')
             if args.workflow_test:
                 request_execute()
+            if args.course_test:
+                workflow_finished = True
             if args.plan_preview_test:
                 if args.enable_physical_execution:
-                    check = subprocess.run(['/bin/bash', str(directory / 'run-host-ros.sh'),
-                        str(directory / 'execute-physical-plan.py'), '--check-only', '--trajectory', str(trajectory_path)],
+                    check = subprocess.run(['/bin/bash', str(source_directory / 'run-host-ros.sh'),
+                        str(source_directory / 'execute-physical-plan.py'), '--check-only', '--trajectory', str(trajectory_path)],
                         env=dict(os.environ, UR_DEMO_ROS_DOMAIN_ID='174'), capture_output=True, text=True, timeout=40)
                     (directory / 'physical-preflight-test.log').write_text(check.stdout+check.stderr)
                     report['execution_preflight'] = json.loads((directory / 'physical-preflight-dod.json').read_text())
@@ -433,9 +522,9 @@ try:
         if execute_button is not None:
             at_start = max(abs(state['positions'][n]-trajectory['points'][0]['positions'][i]) for i,n in enumerate(names)) < .003
             physical_ready = args.enable_physical_execution and 'physical_contract' in trajectory and at_start and robot_status['program'] and area_clear.get_value_as_bool()
-            execute_button.enabled = preview_ready and operation is None and (physical_ready if args.physical_preview else True)
+            execute_button.enabled = plan_valid and preview_ready and operation is None and (physical_ready if args.physical_preview else True)
             plan_button.enabled = operation is None
-            preview_button.enabled = operation is None and not target_changed
+            preview_button.enabled = plan_valid and operation is None and not target_changed
         if stop_button is not None:
             stop_button.enabled = operation_kind == 'execute' and operation is not None
             tracking = ''
@@ -444,16 +533,16 @@ try:
             telemetry_label.text = f"External Control: {'RUNNING' if robot_status['program'] else 'STOPPED'} | Speed: {robot_status['speed']*100:.0f}% | GHOST: {preview_time:.2f}/{duration:.2f} s"+tracking
         app.update()
         frames += 1
-        if (args.workflow_test or args.plan_preview_test) and workflow_finished:
+        if (args.workflow_test or args.plan_preview_test or args.course_test) and workflow_finished:
             break
         if args.test and not args.workflow_test and elapsed >= duration:
             break
-        if (args.workflow_test or args.plan_preview_test) and time.monotonic()-start_wait > 120:
+        if (args.workflow_test or args.plan_preview_test or args.course_test) and time.monotonic()-start_wait > 120:
             raise TimeoutError('Interactive workflow timeout')
     if max_fk_error > 1e-6 or real_max_fk_error > 1e-6:
         raise RuntimeError(f'USD/FK disagreement: ghost={max_fk_error}, REAL={real_max_fk_error}')
     stage.GetRootLayer().Export(str(directory / f'{prefix}ur5e-twins.usda'))
-    if args.test or args.workflow_test or args.plan_preview_test:
+    if args.test or args.workflow_test or args.plan_preview_test or args.course_test:
         capture = capture_viewport_to_file(viewport, str(directory / f'{prefix}ur5e-preview.png'))
         for _ in range(30):
             app.update()
@@ -469,6 +558,8 @@ try:
         if execution_display_error > 0.03:
             report['result'] = 'FAIL'
             raise RuntimeError(f'Execution display error: {execution_display_error} rad')
+    if args.course_test:
+        report['course_preview_completed'] = workflow_finished
     if args.plan_preview_test:
         report.update(workflow='physical /joint_states -> TargetTCP -> MoveIt/cuMotion -> GHOST preview',
                       plan_preview_completed=workflow_finished)

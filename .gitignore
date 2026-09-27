@@ -18,6 +18,7 @@ log/
 /assets/
 /assets-physical/
 /execution-history/
+/obstacle_course/runs/
 *.log
 *.pid
 *.lock
