@@ -1,0 +1,90 @@
+version: 1
+frame_id: base_link
+initial_joint_positions:
+- -1.0
+- -2.2
+- 1.9
+- -1.383
+- -1.57
+- 0.0
+goal:
+  position:
+  - 0.014625515052772358
+  - 0.2696384212480329
+  - 0.534203583988536
+  quaternion_xyzw:
+  - -0.9580461847273978
+  - 0.28107514124165955
+  - -0.01540514293605066
+  - 0.05391618009816546
+scenarios:
+  single_wall:
+    label: Single wall
+    obstacles:
+      wall: &id001
+        type: box
+        position:
+        - 0.23
+        - 0.1
+        - 0.57
+        size:
+        - 0.2
+        - 0.06
+        - 0.38
+  corridor:
+    label: Corridor
+    obstacles:
+      wall: *id001
+      left_guide:
+        type: box
+        position:
+        - -0.34
+        - 0.46
+        - 0.53
+        size:
+        - 0.06
+        - 0.44
+        - 0.56
+      right_guide:
+        type: box
+        position:
+        - 0.4
+        - 0.36
+        - 0.53
+        size:
+        - 0.06
+        - 0.62
+        - 0.56
+  gate_3d:
+    label: 3D gate
+    obstacles:
+      left_post:
+        type: box
+        position:
+        - -0.24
+        - 0.02
+        - 0.6
+        size:
+        - 0.08
+        - 0.04
+        - 0.6
+      right_post:
+        type: box
+        position:
+        - 0.4
+        - 0.02
+        - 0.6
+        size:
+        - 0.08
+        - 0.04
+        - 0.6
+      top_beam:
+        type: box
+        position:
+        - 0.08
+        - 0.02
+        - 0.74
+        size:
+        - 0.72
+        - 0.04
+        - 0.12

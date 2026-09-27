@@ -22,8 +22,11 @@ target[0] += 0.15
 action_name = os.environ.get('UR_DOD_ACTION', '/cumotion/move_group')
 output_prefix = os.environ.get('UR_DOD_OUTPUT_PREFIX', 'cumotion')
 report = {'result': 'FAIL', 'test': 'cuMotion plan only', 'action': action_name, 'joint_names': names}
-output = Path(__file__).resolve().parent
-urdf_file = Path(os.environ.get('UR_DOD_URDF', str(output / 'ur5e.urdf')))
+source = Path(__file__).resolve().parent
+output = Path(os.environ.get('UR_DOD_OUTPUT_DIR', str(source))).resolve()
+output.mkdir(parents=True, exist_ok=True)
+course = None
+urdf_file = Path(os.environ.get('UR_DOD_URDF', str(source / 'ur5e.urdf')))
 calibration_label = os.environ.get('UR_DOD_CALIBRATION', 'generic')
 report.update(urdf=str(urdf_file), calibration=calibration_label)
 target_tcp_file = os.environ.get('UR_DOD_TARGET_TCP')
@@ -78,9 +81,24 @@ try:
         wait_until(lambda: received_target['message'] is not None, 15, 'Missing TargetTCP PoseStamped')
         if time.monotonic()-received_target['received'] > 0.2:
             raise RuntimeError('TargetTCP pose stale')
-    if not target_tcp_file and not target_topic:
+    if os.environ.get('UR_DOD_JOINT_GOAL'):
+        target = json.loads(os.environ['UR_DOD_JOINT_GOAL'])
+        if len(target) != 6 or not all(isinstance(q,(int,float)) for q in target):
+            raise ValueError('Invalid qualification joint goal')
+    elif not target_tcp_file and not target_topic:
         target = list(start)
         target[0] += 0.15
+    if os.environ.get('UR_DOD_COURSE_CONFIG'):
+        import sys
+        sys.path.insert(0, str(source / 'obstacle_course/src'))
+        from world import load
+        from ros_scene import Scene, RuntimeProof
+        course = load(os.environ['UR_DOD_COURSE_CONFIG'], os.environ['UR_DOD_COURSE_SCENARIO'])
+        course_scene = Scene(node, wait_until)
+        course_enabled = os.environ.get('UR_DOD_COURSE_ENABLED', '1') == '1'
+        course_scene.apply(course, enabled=course_enabled)
+        proof = RuntimeProof(node, course_scene)
+        proof.begin()
     goal = MoveGroup.Goal()
     goal.request.group_name = 'ur_manipulator'
     goal.request.planner_id = 'cuMotion'
@@ -157,12 +175,17 @@ try:
             request.ik_request.pose_stamped.pose = pose
             request.ik_request.avoid_collisions = True
             request.ik_request.timeout.sec = 2
-            ik_future = ik_client.call_async(request)
-            wait_until(ik_future.done, 10, 'Seeded IK response timeout')
-            ik = ik_future.result()
-            if ik.error_code.val != MoveItErrorCodes.SUCCESS:
-                raise RuntimeError(f'No collision-free seeded IK solution: {ik.error_code.val}')
-            solution = dict(zip(ik.solution.joint_state.name, ik.solution.joint_state.position))
+            if course:
+                from seeded_ik import solve
+                solutions, report['course_ik'] = solve(ik_client,request,wait_until,names,start,urdf_file)
+                solution = solutions[0]
+            else:
+                ik_future = ik_client.call_async(request)
+                wait_until(ik_future.done, 10, 'Seeded IK response timeout')
+                ik = ik_future.result()
+                if ik.error_code.val != MoveItErrorCodes.SUCCESS:
+                    raise RuntimeError(f'No collision-free seeded IK solution: {ik.error_code.val}')
+                solution = dict(zip(ik.solution.joint_state.name, ik.solution.joint_state.position))
             target = [solution[name] for name in names]
             constraints.position_constraints = []
             constraints.orientation_constraints = []
@@ -177,22 +200,53 @@ try:
         constraints.joint_constraints = [JointConstraint(joint_name=name, position=q,
             tolerance_above=0.001, tolerance_below=0.001, weight=1.0)
             for name, q in zip(names, target)]
+    candidate_goals = [[s[name] for name in names] for s in solutions] if course and os.environ.get('UR_DOD_SEEDED_IK') == '1' else [target]
     goal.request.goal_constraints = [constraints]
     goal.planning_options.plan_only = True
     goal.planning_options.planning_scene_diff.is_diff = True
-    submitted = client.send_goal_async(goal)
-    wait_until(submitted.done, 15, 'No planning acceptance response')
-    handle = submitted.result()
-    if not handle.accepted:
-        raise RuntimeError('cuMotion rejected plan request')
-    response = handle.get_result_async()
-    wait_until(response.done, 90, 'cuMotion did not finish planning')
-    result = response.result()
-    trajectory = result.result.planned_trajectory.joint_trajectory
-    report.update(action_status=result.status, moveit_error_code=result.result.error_code.val,
-                  planning_time_s=result.result.planning_time, point_count=len(trajectory.points))
-    if result.status != GoalStatus.STATUS_SUCCEEDED or result.result.error_code.val != MoveItErrorCodes.SUCCESS:
-        raise RuntimeError(f'cuMotion plan failed: {report}')
+    attempts=[]
+    for candidate in candidate_goals:
+        if course and os.environ.get('UR_DOD_SEEDED_IK') == '1':
+            goal.request.goal_constraints[0].joint_constraints = [JointConstraint(joint_name=name,
+                position=value,tolerance_above=.001,tolerance_below=.001,weight=1.)
+                for name,value in zip(names,candidate)]
+        if course:
+            proof.arm()
+        submitted=client.send_goal_async(goal)
+        wait_until(submitted.done,15,'No planning acceptance response')
+        handle=submitted.result()
+        if not handle.accepted:
+            raise RuntimeError('cuMotion rejected plan request')
+        response=handle.get_result_async()
+        wait_until(response.done,90,'cuMotion did not finish planning')
+        result=response.result()
+        trajectory=result.result.planned_trajectory.joint_trajectory
+        attempt={'joint_goal':candidate,'action_status':result.status,
+            'moveit_error_code':result.result.error_code.val,
+            'planning_time_s':result.result.planning_time,'point_count':len(trajectory.points)}
+        if course:
+            if result.result.error_code.val==MoveItErrorCodes.SUCCESS:
+                attempt['runtime_planner']=proof.finish(wait_until)
+            else:
+                attempt['runtime_planner']=dict(proof.proof,backend_goals=proof.new_goals())
+        attempts.append(attempt)
+        if result.status==GoalStatus.STATUS_SUCCEEDED and result.result.error_code.val==MoveItErrorCodes.SUCCESS:
+            target=candidate
+            report.update(action_status=result.status,moveit_error_code=result.result.error_code.val,
+                planning_time_s=result.result.planning_time,point_count=len(trajectory.points))
+            if course:
+                report['runtime_planner']=attempt['runtime_planner']
+                report['course_planning_attempts']=attempts
+                report['ik_solution']=target
+                report['ik_max_joint_delta_rad']=max(abs(a-b) for a,b in zip(target,start))
+            break
+    else:
+        report['course_planning_attempts']=attempts
+        report.update(action_status=result.status,moveit_error_code=result.result.error_code.val,
+            planning_time_s=result.result.planning_time,point_count=len(trajectory.points))
+        if course:
+            report['runtime_planner']=attempts[-1]['runtime_planner']
+        raise RuntimeError(f'cuMotion plan failed after {len(attempts)} IK candidates')
     if len(trajectory.points) < 2 or set(trajectory.joint_names) != set(names):
         raise RuntimeError('Invalid or empty planned trajectory')
     indices = [trajectory.joint_names.index(name) for name in names]
@@ -202,7 +256,7 @@ try:
     if os.environ.get('UR_DOD_SEEDED_IK') == '1':
         report['endpoint_ik_max_joint_error_rad'] = max(abs(a-b) for a,b in zip(end, target))
     if target_tcp_file or target_topic:
-        spec = importlib.util.spec_from_file_location('demo_model', output / 'demo-model.py')
+        spec = importlib.util.spec_from_file_location('demo_model', source / 'demo-model.py')
         model = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(model)
         actual_tcp = model.Kinematics(urdf_file).world_transforms(dict(zip(names,end)))['tool0']
@@ -228,17 +282,18 @@ try:
     times = [p['time_from_start_s'] for p in planned['points']]
     if any(b <= a for a,b in zip(times, times[1:])):
         raise RuntimeError('Trajectory timestamps do not increase strictly')
-    if os.environ.get('UR_DOD_PREPARE_PHYSICAL') == '1':
+    if os.environ.get('UR_DOD_PREPARE_PHYSICAL') == '1' or course:
         import yaml
         from moveit_msgs.srv import GetStateValidity, GetPlanningScene
         def load_module(name, filename):
-            module_spec = importlib.util.spec_from_file_location(name, output / filename)
+            module_spec = importlib.util.spec_from_file_location(name, source / filename)
             module = importlib.util.module_from_spec(module_spec)
             module_spec.loader.exec_module(module)
             return module
         contract = load_module('execution_contract', 'execution-contract.py')
         scene_tools = load_module('scene_fingerprint', 'scene-fingerprint.py')
-        calibration_hash = yaml.safe_load((urdf_file.parent / 'ur5e-calibration.yaml').read_text())['kinematics']['hash']
+        calibration_hash = (yaml.safe_load((urdf_file.parent / 'ur5e-calibration.yaml').read_text())['kinematics']['hash']
+            if os.environ.get('UR_DOD_PREPARE_PHYSICAL') == '1' else 'generic_obstacle_course')
         planned = contract.prepare(planned, urdf_file, calibration_hash)
         scene_client = node.create_client(GetPlanningScene, '/get_planning_scene')
         validity_client = node.create_client(GetStateValidity, '/check_state_validity')
@@ -272,11 +327,23 @@ try:
         report.update(physical_contract=planned['physical_contract'],
                       physical_trajectory_prepared=True)
         times = [p['time_from_start_s'] for p in planned['points']]
+    if course:
+        course_scene.verify(course, enabled=course_enabled)
+        current = load(course['config_path'], course['scenario'])
+        if current['geometry_sha256'] != course['geometry_sha256']:
+            raise RuntimeError('Obstacle configuration changed while planning')
+        planned['obstacle_course'] = dict(course, enabled=course_enabled, runtime_planner=report['runtime_planner'])
+        report.update(obstacle_course=course['scenario'], geometry_sha256=course['geometry_sha256'],
+            world_collision_objects=len(course['obstacles']) if course_enabled else 0,
+            start_pose=model.Kinematics(urdf_file).world_transforms(dict(zip(names,start)))['tool0'].tolist(),
+            target_pose=target_config['matrix_column_vectors'], collision_free=True)
     (output / f'ur5e-{output_prefix}-planned-trajectory.json').write_text(json.dumps(planned, indent=2)+'\n')
     report.update(result='PASS', duration_s=times[-1])
     print(json.dumps(report, indent=2))
 except Exception as exc:
     report['error'] = str(exc)
+    report['planning_status'] = 'PLANNING FAILED'
+    (output / f'ur5e-{output_prefix}-planned-trajectory.json').unlink(missing_ok=True)
     raise
 finally:
     (output / f'{output_prefix}-dod.json').write_text(json.dumps(report, indent=2)+'\n')

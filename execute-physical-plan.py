@@ -95,6 +95,10 @@ def atomic_json(path, value):
 def emit(**values):
     display.update(values)
     if args.execute:
+        course = trajectory.get('obstacle_course')
+        if course and (not course.get('enabled') or approval.get('physical_obstacles_match_scene') is not True
+                or approval.get('obstacle_geometry_sha256') != course['geometry_sha256']):
+            raise RuntimeError('Confirm that physical obstacles match the previewed course')
         atomic_json(output / 'physical-execution-state.json', display)
 
 def signal_stop(signum, frame):

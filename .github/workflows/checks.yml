@@ -18,3 +18,5 @@ jobs:
           while IFS= read -r -d '' script; do bash -n "$script"; done < <(find . -name '*.sh' -print0)
       - name: Synthetic trajectory contract
         run: python test-execution-contract.py
+      - name: Shared obstacle geometry
+        run: python obstacle_course/tests/test_world.py
